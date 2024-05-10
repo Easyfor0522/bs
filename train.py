@@ -1,4 +1,4 @@
-
+import cv2
 import torch
 import torch.nn as nn
 import numpy as np
@@ -8,6 +8,7 @@ from torch.nn import TransformerEncoder, TransformerEncoderLayer
 from dataloaders.ucf_dataset import UCFDataset
 import torchvision.models as models
 from torch.autograd import Variable
+import torch.nn.functional as F
 
 
 def dataloader(clip_len, batch_size, shuffle, data_type):
@@ -39,14 +40,14 @@ def dataloader(clip_len, batch_size, shuffle, data_type):
     print("start test Dataloader")
     print('train_set_len: ' + str(len(train_dataloader)))
     print('test_set_len: ' + str(len(test_dataloader)))
-    # for i_batch, (video, motion, labels) in enumerate(test_dataloader):
-    #     print('video shape:')
-    #     print(video.shape)
-    #     print('motion shape:')
-    #     print(motion.shape)
-    #     print('labels shape')
-    #     print(labels.shape)  # 每段视频的 类别
-    #     break
+    for i_batch, (video, motion, labels) in enumerate(test_dataloader):
+        print('video shape:')
+        print(video.shape)
+        print('motion shape:')
+        print(motion.shape)
+        print('labels shape')
+        print(labels.shape)  # 每段视频的 类别
+        break
 
     
 
@@ -102,31 +103,32 @@ class PositionalEncoding(nn.Module):
     def forward(self, x):
         x = x + self.pe[:x.shape[0], :]
         return self.dropout(x)
+    
 
-def extract_features(resnet, batch):
-    features = []
-    for i in range(batch.size(0)):
-        video = batch[i]
-        video_features = []
-        for j in range(video.size(0)):
-            frame = video[j]
-            #frame = transform(frame)
-            frame = Variable(frame.unsqueeze(0))
-            if torch.cuda.is_available():
-                frame = frame.cuda()
-            feature = resnet(frame)
-            video_features.append(feature.view(feature.size(0), -1))
-        video_features = torch.cat(video_features, dim=0)
-        features.append(video_features)
-    features = torch.stack(features, dim=0)
-    return features
+
+# def extract_features(tensor, resnet):
+#     features = []
+#     for i in range(tensor.size(0)):
+#         image = tensor[i]
+#         #image = transform(image)
+#         image = image.unsqueeze(0)
+#         feature = resnet(image)
+#         feature = feature.view(feature.size(0), -1)
+#         features.append(feature)
+#     features = torch.cat(features, dim=0)
+#     return features
 ########################################################
 # 训练过程, 待完成
 ########################################################
 def train(model, device, train_loader, test_loader, epochs, criterion, optimizer):
 
-    resnet = models.resnet101(pretrained=True)
-    resnet.eval()
+    # 加载预训练的 ResNet 模型
+    resnet = models.resnet50(pretrained=True)
+    # 冻结模型的权重
+    for param in resnet.parameters():
+        param.requires_grad = False
+    # 移除最后一层全连接层(最后一次分类曾，会输出概率，取其某一特征层输出，这里选择倒数第二层)
+    resnet = torch.nn.Sequential(*list(resnet.children())[:-1])
 
     model.to(device)
     batches = len(train_loader)
@@ -135,15 +137,31 @@ def train(model, device, train_loader, test_loader, epochs, criterion, optimizer
         model.train()   # train()模式才能调整网络参数
         batch = -1  # 记录是第几个batch
         for video, motion, labels in train_loader:
-            feature_video = extract_features(resnet, video)
+            # 重塑视频张量的维度
+            video = video.view(-1, 3, 128, 171)  # 重塑为 (64*16, 3, 128, 171)
+
+            # # 标准化（示例：将像素值缩放到0到1之间）
+            # video = video.float() / 255.0
+
+            # # 使用平均池化缩小空间维度
+            # video = F.avg_pool2d(video, kernel_size=16, stride=16)  # 缩小空间维度为 128/16 = 8
+            feature_video = resnet(video)
+            feature_video = torch.squeeze(feature_video)
+            # 将张量形状重新调整为 (64, 16, 2048)
+            feature_video = feature_video.view(64, 16, 2048)
+
+            # 沿着第二个维度进行拼接，将每个拼接后的向量的维度从 2048 扩展为 32768
+            feature_video = feature_video.view(64, -1)
+
             feature_motion = motion.view(64, -1)
             features = torch.cat((feature_video, feature_motion), dim=1)   # 在维度 1 拼接
+
             batch += 1
             
             # move to device
             #motion = motion.float().to(device)
             labels = labels.to(device)
-
+            features = features.to(device)
             # # print(motion.shape)
             # resnet = resnet101(pretrained=True)
             # resnet.eval()
@@ -204,7 +222,7 @@ if __name__ == '__main__':
     print('device:')
     print(device)
     # 创建网络模型
-    input_dim = 2048 + 2112  # 特征维度：33*4 #
+    input_dim = 34880  # 特征维度：33*4 #
     # [batch_size, frames, keypoints, xyzv] -> [batch_size, 时间维度， 特征维度]
     hidden_dim = 128     # transformer 隐藏层深度
     num_headers = 2     # 多注意力头，建议取值2~8
