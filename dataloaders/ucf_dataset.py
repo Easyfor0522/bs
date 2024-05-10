@@ -281,6 +281,7 @@ class UCFDataset(Dataset):
 
 
 
+        
         if data_type == 'video':
 
             if split == 'train':
@@ -404,7 +405,7 @@ class UCFDataset(Dataset):
 
         frame_count = data[0][0]
 
-        video_x = np.empty((self.clip_len, self.resize_height, self.resize_width, 3), np.dtype('float32'))
+        video_x = np.empty((self.clip_len,  self.resize_height, self.resize_width, 3), np.dtype('float32'))
 
         image_start = random.randint(1, frame_count - self.clip_len)
 
