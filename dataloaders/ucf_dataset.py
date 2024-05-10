@@ -384,7 +384,7 @@ class UCFDataset(Dataset):
 
         video_file_path = os.path.join(self.root_dir, name)
 
-        buffer = np.load(f'{video_file_path}.npy')
+        #buffer = np.load(f'{video_file_path}.npy')
 
         return buffer1, buffer2, torch.from_numpy(np.array(labels))
 
@@ -440,7 +440,7 @@ class UCFDataset(Dataset):
 
         dir_name = slash_rows[0]
 
-        video_jpgs_path = os.path.join('data/ucf101/UCF101_npy', dir_name)
+        video_jpgs_path = os.path.join(self.root_dir, dir_name)
 
         # get the random continuous 16 frame
 
