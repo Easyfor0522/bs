@@ -9,7 +9,7 @@ from dataloaders.ucf_dataset import UCFDataset
 import torchvision.models as models
 from torch.autograd import Variable
 import torch.nn.functional as F
-
+from tqdm import tqdm
 
 def dataloader(clip_len, batch_size, shuffle, data_type):
     root_dir = 'data/ucf101/UCF101_n_frames'
@@ -76,7 +76,9 @@ class TransformerClassifier(nn.Module):
         self.fc = nn.Linear(hidden_dim, num_classes)
 
     def forward(self, x):
-        x = x.view(x.shape[0], x.shape[1], -1) # batch_size, frames, feature_dim
+        #print('1221',x.shape)
+        #x = x.view(x.shape[0], x.shape[1], -1) # batch_size, frames, feature_dim
+        #print('1221',x.shape)
         x = self.embedding(x)
         x = self.positional_encoding(x) # bs, seq_lem, dim
         x = x.transpose(0, 1)  # 输入形状为 (seq_len, batch_size, d)
@@ -120,90 +122,99 @@ class PositionalEncoding(nn.Module):
 ########################################################
 # 训练过程, 待完成
 ########################################################
-def train(model, device, train_loader, test_loader, epochs, criterion, optimizer):
+def train(model, device, train_loader, test_loader, epochs, criterion, optimizer, batch_size):
 
     # 加载预训练的 ResNet 模型
-    resnet = models.resnet50(pretrained=True)
+    resnet = models.resnet101(pretrained=True)
     # 冻结模型的权重
     for param in resnet.parameters():
         param.requires_grad = False
+    #resnet.conv1 = nn.Conv2d(3,1024,kernel_size=(7, 7), stride=(2, 2), padding=(3, 3), bias=False)
+    #print(resnet)
+    
     # 移除最后一层全连接层(最后一次分类曾，会输出概率，取其某一特征层输出，这里选择倒数第二层)
     resnet = torch.nn.Sequential(*list(resnet.children())[:-1])
-
+    resnet.to(device)
     model.to(device)
+    criterion.to(device)
     batches = len(train_loader)
-
-    for epoch in range(epochs):
-        model.train()   # train()模式才能调整网络参数
-        batch = -1  # 记录是第几个batch
-        for video, motion, labels in train_loader:
-            # 重塑视频张量的维度
-            video = video.view(-1, 3, 128, 171)  # 重塑为 (64*16, 3, 128, 171)
-
-            # # 标准化（示例：将像素值缩放到0到1之间）
-            # video = video.float() / 255.0
-
-            # # 使用平均池化缩小空间维度
-            # video = F.avg_pool2d(video, kernel_size=16, stride=16)  # 缩小空间维度为 128/16 = 8
-            feature_video = resnet(video)
-            feature_video = torch.squeeze(feature_video)
-            # 将张量形状重新调整为 (64, 16, 2048)
-            feature_video = feature_video.view(64, 16, 2048)
-
-            # 沿着第二个维度进行拼接，将每个拼接后的向量的维度从 2048 扩展为 32768
-            feature_video = feature_video.view(64, -1)
-
-            feature_motion = motion.view(64, -1)
-            features = torch.cat((feature_video, feature_motion), dim=1)   # 在维度 1 拼接
-
-            batch += 1
-            
-            # move to device
-            #motion = motion.float().to(device)
-            labels = labels.to(device)
-            features = features.to(device)
-            # # print(motion.shape)
-            # resnet = resnet101(pretrained=True)
-            # resnet.eval()
-            # motion = resnet(motion)
-
-            # forward
-            outputs = model(features)
-            loss = criterion(outputs, labels)
-
-            # record_loss
-            loss_value = loss.item()
-            # backward
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-
-            # log per 10 batches
-            if batch % 30 == 0: 
-                print(f"Epoch [{epoch + 1}/{epochs}], Batch [{batch}/{batches}], "
-                        f"Loss: {loss_value:.4f}")
+    with tqdm(total = epochs) as pbar1:
         
-        # 测试集上测试
-        model.eval()       
-        with torch.no_grad():
-            correct = 0     # 计数分类正确的个数
-            total = 0
-            for motion, labels in test_loader:
-                motion = motion.to(device)
-                labels = labels.to(device)
-
-                outputs = model(motion)
-                # 网络输出的是一推概率(0.0~1.0)，表示网络认为这是某个类别的可能性，取可能性最大的那个类别的index
-                _, predicted = torch.max(outputs.data, 1)
-                total += labels.size(0)
-                correct += (predicted == labels).sum().item()
-            accuracy = 100 * correct / total
-            print(f"Epoch [{epoch + 1}/{epochs}]", f"Test Accuracy: {accuracy:.2f}%")
+        for epoch in range(epochs):
+            pbar1.set_description('Epoch {}/{}'.format(epoch, epochs))
+            model.train()   # train()模式才能调整网络参数
             
+            with tqdm(total=len(train_loader)) as pbar2:
+                pbar2.set_description('Training: ')
+                for video, motion, labels in train_loader:
+                    video = torch.FloatTensor(video)
+                    motion = torch.FloatTensor(motion)
+
+                    # 将前两个维度相乘
+                    video1 = video.view(batch_size * 16, 128, 171, 3)
+
+                    # 将最后一个维度前移
+                    video1 = video1.permute(0, 3, 1, 2).to(device)
+                    motion = motion.to(device)
+                    feature_video = resnet(video1)
+                    feature_video = feature_video.view(batch_size,16*2048)
+                    feature_motion = motion.view(batch_size, -1)
+                    #print(feature_video.shape,feature_motion.shape)
+                    features = torch.cat((feature_video, feature_motion), dim=1)   # 在维度 1 拼接
+                    
+                    # move to device
+                    #motion = motion.float().to(device)
+                    labels = labels.to(device)
+
+                    # forward
+                    outputs = model(features)
+                    loss = criterion(outputs, labels)
+
+                    # record_loss
+                    loss_value = loss.item()
+                    # backward
+                    optimizer.zero_grad()
+                    loss.backward()
+                    optimizer.step()
+                    pbar2.set_postfix_str(f"Loss: {loss_value:.4f}")
+                    pbar2.update(1)
+
+            # 测试集上测试
+            with tqdm(total=len(test_loader)) as pbar2:
+                model.eval()       
+                with torch.no_grad():
+                    correct = 0     # 计数分类正确的个数
+                    total = 0
+                    pbar2.set_description('Evaluation: ')
+                    for video, motion, labels in test_loader:
+                        video = torch.FloatTensor(video)
+                        motion = torch.FloatTensor(motion)
+                        video1 = video.view(batch_size * 16, 128, 171, 3)
+
+                        # 将最后一个维度前移
+                        video1 = video1.permute(0, 3, 1, 2).to(device)
+                        motion = motion.to(device)
+                        feature_video = resnet(video1)
+                        feature_video = feature_video.view(batch_size,16*2048)
+                        feature_motion = motion.view(batch_size, -1)
+                        #print(feature_video.shape,feature_motion.shape)
+                        features = torch.cat((feature_video, feature_motion), dim=1)   # 在维度 1 拼接
+                        labels = labels.to(device)
+                        outputs = model(features)
+                        # 网络输出的是一推概率(0.0~1.0)，表示网络认为这是某个类别的可能性，取可能性最大的那个类别的index
+                        _, predicted = torch.max(outputs.data, 1)
+                        total += labels.size(0)
+                        correct += (predicted == labels).sum().item()
+                        accuracy = 100 * correct / total
+                        pbar2.set_postfix_str(f"Test Accuracy: {accuracy:.2f}%")
+                        pbar2.update(1)
+
+            pbar1.update(1)            
+
 
 if __name__ == '__main__':
     # 加载数据集
-    batch_size = 64
+    batch_size = 128
     clip_len = 16
     # clip_len: 每段视频只抽取若干帧，最小的帧数好像是84，建议小于60
     # batch_size: 分批次加载 的 批大小
@@ -218,14 +229,14 @@ if __name__ == '__main__':
     print('Dataloaders Ready!')     # 如果运行到这里，说明 dataloader OK
 
     # 指定设备：cpu or cuda
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print('device:')
-    print(device)
+    # device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    # print('device:')
+    # print(device)
     # 创建网络模型
     input_dim = 34880  # 特征维度：33*4 #
     # [batch_size, frames, keypoints, xyzv] -> [batch_size, 时间维度， 特征维度]
-    hidden_dim = 128     # transformer 隐藏层深度
-    num_headers = 2     # 多注意力头，建议取值2~8
+    hidden_dim = 256    # transformer 隐藏层深度
+    num_headers = 4     # 多注意力头，建议取值2~8
     num_layers = 2      # tf 层数，建议取值2~6
     num_classes = 101   # 分类数'''
     model = TransformerClassifier(input_dim=input_dim, hidden_dim=hidden_dim,
@@ -233,15 +244,15 @@ if __name__ == '__main__':
                                   num_classes=num_classes)
  
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model.to(device)
 
     # 设置学习率 和 训练轮数
     learning_rate = 0.0001  # 学习率，调整使得 loss逐渐收敛 且 正确率稳定上升
-    epochs = 1   # 表示遍历epoch遍数据集,测试请设置为 1
+    epochs = 10  # 表示遍历epoch遍数据集,测试请设置为 1
 
     # define Loss and optimizer
     criterion = nn.CrossEntropyLoss()   # 交叉熵损失函数，常用于多分类
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)    # 优化器不需要改
 
     # 开始训练
-    train(model, device, train_loader, test_loader, epochs, criterion, optimizer)
+    train(model, device, train_loader, test_loader, epochs, criterion, optimizer, batch_size)
+    torch.save(model.state_dict(), 'model_weights.pth')
